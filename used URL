@@ -1,3 +1,9 @@
 https://ai.google.dev/edge/mediapipe/solutions/vision/gesture_recognizer/python?hl=ja
 
 https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker?hl=ja
+
+プログラム実行前に実行
+wget https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+
+ダウンロード
+https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
