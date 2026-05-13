@@ -72,7 +72,7 @@ r_click_display_time = 0
 up_display_time = 0
 down_display_time = 0
 DIR_DISPLAY_DURATION = 0.3
-DIR_THRESHOLD = 0.2
+DIR_THRESHOLD = 0.21
 
 def draw_landmarks(frame, landmarks, w, h):
     points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
