@@ -72,7 +72,10 @@ r_click_display_time = 0
 up_display_time = 0
 down_display_time = 0
 DIR_DISPLAY_DURATION = 0.3
-DIR_THRESHOLD = 0.21
+DIR_THRESHOLD = 0.1
+
+def dist2d(a, b):
+    return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2)
 
 def draw_landmarks(frame, landmarks, w, h):
     points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
@@ -98,6 +101,8 @@ while cap.isOpened():
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     result = detector.detect(mp_image)
 
+    is_move = False  # MOVEフラグ（毎フレームリセット）
+
     if result.hand_landmarks:
         landmarks = result.hand_landmarks[0]
         draw_landmarks(frame, landmarks, w, h)
@@ -105,9 +110,10 @@ while cap.isOpened():
         thumb      = landmarks[4]
         index_tip  = landmarks[8]
         middle_tip = landmarks[12]
+        wrist      = landmarks[0]
 
         # ── 左クリック判定（親指 と 人差し指）──
-        dist_left = math.sqrt((thumb.x - index_tip.x) ** 2 + (thumb.y - index_tip.y) ** 2)
+        dist_left = dist2d(thumb, index_tip)
 
         thumb_px  = (int(thumb.x * w), int(thumb.y * h))
         index_px  = (int(index_tip.x * w), int(index_tip.y * h))
@@ -124,7 +130,7 @@ while cap.isOpened():
             pinch_active = False
 
         # ── 右クリック判定（親指 と 中指）──
-        dist_right = math.sqrt((thumb.x - middle_tip.x) ** 2 + (thumb.y - middle_tip.y) ** 2)
+        dist_right = dist2d(thumb, middle_tip)
 
         middle_px = (int(middle_tip.x * w), int(middle_tip.y * h))
         cv2.circle(frame, middle_px, 10, (0, 165, 255), -1)
@@ -138,14 +144,39 @@ while cap.isOpened():
         else:
             r_pinch_active = False
 
-        # ── 人差し指の向き判定 ──
+        # ── 各指の伸び判定（手首からの距離で判定）──
+        thumb_extended  = dist2d(landmarks[4],  wrist) > dist2d(landmarks[2],  wrist)  # 親指
+        index_folded    = dist2d(landmarks[8],  wrist) < dist2d(landmarks[5],  wrist) * 1.2  # 人差し指
+        middle_folded   = dist2d(landmarks[12], wrist) < dist2d(landmarks[9],  wrist) * 1.2  # 中指
+        ring_folded     = dist2d(landmarks[16], wrist) < dist2d(landmarks[13], wrist) * 1.2  # 薬指
+        pinky_folded    = dist2d(landmarks[20], wrist) < dist2d(landmarks[17], wrist) * 1.2  # 小指
+
+        # ── グッドサイン判定（親指のみ立っている）──
+        only_thumb_up = thumb_extended and index_folded and middle_folded and ring_folded and pinky_folded
+        if only_thumb_up:
+            is_move = True
+
+        # ── 人差し指のみ立っているか判定 ──
+        index_extended = dist2d(index_tip, wrist) > dist2d(landmarks[5], wrist)
+        only_index_up  = index_extended and middle_folded and ring_folded and pinky_folded
+
+        # ── 人差し指の向き判定（人差し指のみ立っている時だけ）──
         index_base = landmarks[5]
         dy = index_base.y - index_tip.y
 
-        if dy > DIR_THRESHOLD:
-            up_display_time = time.time()
-        elif dy < -DIR_THRESHOLD:
-            down_display_time = time.time()
+        if only_index_up:
+            if dy > DIR_THRESHOLD:
+                up_display_time = time.time()
+            elif dy < -DIR_THRESHOLD:
+                down_display_time = time.time()
+
+    # ── MOVE 表示 ──
+    if is_move:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (w//2-100, h//2-50), (w//2+100, h//2+50), (180, 0, 180), -1)
+        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+        cv2.putText(frame, "MOVE", (w//2-80, h//2+20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.8, (255, 255, 255), 4)
 
     # ── 左クリック表示 ──
     if time.time() - click_display_time < CLICK_DISPLAY_DURATION:
