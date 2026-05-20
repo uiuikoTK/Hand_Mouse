@@ -105,7 +105,7 @@ def finger_extended(tip, base, wrist):
     return dist2d(tip, wrist) > dist2d(base, wrist)
 
 def finger_folded(tip, base, wrist):
-    return dist2d(tip, wrist) < dist2d(base, wrist) * 1.2
+    return dist2d(tip, wrist) < dist2d(base, wrist) * 1.6
 
 print("起動しました。[q]キーで終了します。")
 print(f"画面解像度: {SCREEN_W} x {SCREEN_H}")
@@ -150,7 +150,9 @@ while cap.isOpened():
         pinky_fold  = finger_folded(landmarks[20], landmarks[17], wrist)
 
         # ── 全指開き → カーソル移動 ──
-        all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext
+        # 中指・薬指・小指が少しでも曲がったらMOVE終了してカーソルを固定
+        all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext \
+                   and not middle_fold and not ring_fold and not pinky_fold
         if all_open:
             is_move = True
             # 人差し指先端の位置をスクリーン座標にマッピング
