@@ -2,10 +2,14 @@ import os
 import cv2
 import math
 import time
+import threading
 import pyautogui
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
+
+# voice_module は同じフォルダに置いてあること
+from voice_module import listen_voice, type_text
 
 # pyautogui の安全装置を無効化（画面端でも止まらない）
 pyautogui.FAILSAFE = False
@@ -47,8 +51,6 @@ else:
             print("数字を入力してください。")
 
 # ── モデルファイルのパス ──
-# 事前に以下からダウンロードしてこのスクリプトと同じフォルダに置いてください
-# https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
 
 # ── HandLandmarker 初期化 ──
@@ -74,13 +76,13 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 # ── ピンチ・操作設定 ──
 PINCH_THRESHOLD    = 0.06
 DIR_THRESHOLD      = 0.1
-SCROLL_AMOUNT      = 3        # 1回のスクロール量
-CURSOR_ALPHA       = 0.3      # EMA平滑化係数（0〜1、小さいほど滑らか・遅延大）
+SCROLL_AMOUNT      = 3
+CURSOR_ALPHA       = 0.3
 
 pinch_active       = False
 r_pinch_active     = False
-smooth_cx = float(SCREEN_W // 2)  # EMA平滑化後のX（float保持）
-smooth_cy = float(SCREEN_H // 2)  # EMA平滑化後のY
+smooth_cx = float(SCREEN_W // 2)
+smooth_cy = float(SCREEN_H // 2)
 
 # ── 表示設定 ──
 click_display_time   = 0
@@ -90,6 +92,18 @@ down_display_time    = 0
 move_active          = False
 CLICK_DISPLAY_DURATION = 0.5
 DIR_DISPLAY_DURATION   = 0.3
+
+# ── 音声入力の状態管理 ──
+# voice_state:
+#   "idle"       → 待機中（通常動作）
+#   "triggered"  → ピースサインを検出、認識スレッド起動直前
+#   "listening"  → 音声認識スレッド実行中
+voice_state       = "idle"
+voice_state_lock  = threading.Lock()
+# ピースサインを一定時間キープしてから発動（誤検出防止）
+VOICE_HOLD_SEC    = 0.8          # 0.8秒キープで発動
+peace_start_time  = 0.0
+peace_hold_active = False        # 現在ピースサインをキープ中か
 
 def dist2d(a, b):
     return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2)
@@ -105,10 +119,22 @@ def finger_extended(tip, base, wrist):
     return dist2d(tip, wrist) > dist2d(base, wrist)
 
 def finger_folded(tip, base, wrist):
-    return dist2d(tip, wrist) < dist2d(base, wrist) * 1.6
+    return dist2d(tip, wrist) < dist2d(base, wrist) * 1.2
+
+def voice_worker():
+    """音声認識を別スレッドで実行し、完了したら貼り付ける"""
+    global voice_state
+    try:
+        text = listen_voice(phrase_time_limit=30)
+        if text:
+            type_text(text)
+    finally:
+        with voice_state_lock:
+            voice_state = "idle"
 
 print("起動しました。[q]キーで終了します。")
 print(f"画面解像度: {SCREEN_W} x {SCREEN_H}")
+print("ピースサイン（人差し指＋中指を立てて0.8秒キープ）で音声入力モードに入ります。")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -127,6 +153,10 @@ while cap.isOpened():
     result = detector.detect(mp_image)
 
     is_move = False
+
+    # 現在の音声状態をスナップショット（ロック最小化）
+    with voice_state_lock:
+        current_voice_state = voice_state
 
     if result.hand_landmarks:
         landmarks  = result.hand_landmarks[0]
@@ -149,85 +179,137 @@ while cap.isOpened():
         ring_fold   = finger_folded(landmarks[16], landmarks[13], wrist)
         pinky_fold  = finger_folded(landmarks[20], landmarks[17], wrist)
 
-        # ── 全指開き → カーソル移動 ──
-        # 中指・薬指・小指が少しでも曲がったらMOVE終了してカーソルを固定
-        all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext \
-                   and not middle_fold and not ring_fold and not pinky_fold
-        if all_open:
-            is_move = True
-            # 人差し指先端の位置をスクリーン座標にマッピング
-            target_x = index_tip.x * SCREEN_W
-            target_y = index_tip.y * SCREEN_H
-            # EMA（指数移動平均）平滑化：毎フレーム少しずつ目標に近づく
-            smooth_cx += CURSOR_ALPHA * (target_x - smooth_cx)
-            smooth_cy += CURSOR_ALPHA * (target_y - smooth_cy)
-            cx = max(0, min(SCREEN_W - 1, int(smooth_cx)))
-            cy = max(0, min(SCREEN_H - 1, int(smooth_cy)))
-            pyautogui.moveTo(cx, cy)
+        # ── ピースサイン判定（人差し指＋中指を立て、薬指・小指を折る）──
+        # 人差し指と中指が立っていれば発動（他の指の状態は問わない）
+        # 人差し指・中指が立っていて、薬指・小指が折れていること
+        # 親指の状態は問わない（ring/pinky_foldで全指開き=カーソル移動と区別）
+        peace_pose = (
+            index_ext and middle_ext
+            and ring_fold and pinky_fold
+        )
 
-        # ── 左クリック（親指 + 人差し指ピンチ）──
-        thumb_px = (int(thumb.x * w), int(thumb.y * h))
-        index_px = (int(index_tip.x * w), int(index_tip.y * h))
-        cv2.circle(frame, thumb_px, 10, (255, 165, 0), -1)
-        cv2.circle(frame, index_px, 10, (255, 165, 0), -1)
-        cv2.line(frame, thumb_px, index_px, (255, 165, 0), 2)
-
-        dist_left = dist2d(thumb, index_tip)
-        if dist_left < PINCH_THRESHOLD and not is_directing:
-            if not pinch_active:
-                pinch_active = True
-                click_display_time = time.time()
-                pyautogui.click()
+        if peace_pose and current_voice_state == "idle":
+            if not peace_hold_active:
+                # キープ開始
+                peace_hold_active = True
+                peace_start_time  = time.time()
+            else:
+                held = time.time() - peace_start_time
+                if held >= VOICE_HOLD_SEC:
+                    # 発動 → スレッド起動
+                    with voice_state_lock:
+                        voice_state = "listening"
+                    current_voice_state = "listening"
+                    peace_hold_active   = False
+                    t = threading.Thread(target=voice_worker, daemon=True)
+                    t.start()
+                else:
+                    # キープ中のプログレスをオーバーレイで表示（後述）
+                    pass
         else:
-            pinch_active = False
+            peace_hold_active = False
 
-        # ── 右クリック（親指 + 中指ピンチ）──
-        middle_px = (int(middle_tip.x * w), int(middle_tip.y * h))
-        cv2.circle(frame, middle_px, 10, (0, 165, 255), -1)
-        cv2.line(frame, thumb_px, middle_px, (0, 165, 255), 2)
+        # ── 音声入力中は他の操作を全部スキップ ──
+        if current_voice_state == "idle":
 
-        dist_right = dist2d(thumb, middle_tip)
-        if dist_right < PINCH_THRESHOLD and not is_directing:
-            if not r_pinch_active:
-                r_pinch_active = True
-                r_click_display_time = time.time()
-                pyautogui.rightClick()
-        else:
-            r_pinch_active = False
+            # ── 全指開き → カーソル移動 ──
+            all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext
+            if all_open:
+                is_move = True
+                target_x = index_tip.x * SCREEN_W
+                target_y = index_tip.y * SCREEN_H
+                smooth_cx += CURSOR_ALPHA * (target_x - smooth_cx)
+                smooth_cy += CURSOR_ALPHA * (target_y - smooth_cy)
+                cx = max(0, min(SCREEN_W - 1, int(smooth_cx)))
+                cy = max(0, min(SCREEN_H - 1, int(smooth_cy)))
+                pyautogui.moveTo(cx, cy)
 
-        # ── 人差し指＋親指の2本が立っている → スクロール方向判定 ──
-        # （中指・薬指・小指は折れていること）
-        scroll_pose = thumb_ext and index_ext and middle_fold and ring_fold and pinky_fold
-        if scroll_pose:
-            dy = index_base.y - index_tip.y
-            if dy > DIR_THRESHOLD:
-                up_display_time = time.time()
-                pyautogui.scroll(SCROLL_AMOUNT)
-            elif dy < -DIR_THRESHOLD:
-                down_display_time = time.time()
-                pyautogui.scroll(-SCROLL_AMOUNT)
+            # ── 左クリック（親指 + 人差し指ピンチ）──
+            thumb_px = (int(thumb.x * w), int(thumb.y * h))
+            index_px = (int(index_tip.x * w), int(index_tip.y * h))
+            cv2.circle(frame, thumb_px, 10, (255, 165, 0), -1)
+            cv2.circle(frame, index_px, 10, (255, 165, 0), -1)
+            cv2.line(frame, thumb_px, index_px, (255, 165, 0), 2)
+
+            dist_left = dist2d(thumb, index_tip)
+            if dist_left < PINCH_THRESHOLD and not is_directing:
+                if not pinch_active:
+                    pinch_active = True
+                    click_display_time = time.time()
+                    pyautogui.click()
+            else:
+                pinch_active = False
+
+            # ── 右クリック（親指 + 中指ピンチ）──
+            middle_px = (int(middle_tip.x * w), int(middle_tip.y * h))
+            cv2.circle(frame, middle_px, 10, (0, 165, 255), -1)
+            cv2.line(frame, thumb_px, middle_px, (0, 165, 255), 2)
+
+            dist_right = dist2d(thumb, middle_tip)
+            if dist_right < PINCH_THRESHOLD and not is_directing:
+                if not r_pinch_active:
+                    r_pinch_active = True
+                    r_click_display_time = time.time()
+                    pyautogui.rightClick()
+            else:
+                r_pinch_active = False
+
+            # ── スクロール（親指＋人差し指の2本立て、中薬小折り）──
+            scroll_pose = thumb_ext and index_ext and middle_fold and ring_fold and pinky_fold
+            if scroll_pose:
+                dy = index_base.y - index_tip.y
+                if dy > DIR_THRESHOLD:
+                    up_display_time = time.time()
+                    pyautogui.scroll(SCROLL_AMOUNT)
+                elif dy < -DIR_THRESHOLD:
+                    down_display_time = time.time()
+                    pyautogui.scroll(-SCROLL_AMOUNT)
+
+    else:
+        # 手が映っていないときはピースキープをリセット
+        peace_hold_active = False
 
     # ── オーバーレイ表示 ──
     def show_overlay(text, color):
         tw = len(text) * 30
         overlay = frame.copy()
-        cv2.rectangle(overlay, (w//2 - tw//2 - 20, h//2 - 50), (w//2 + tw//2 + 20, h//2 + 50), color, -1)
+        cv2.rectangle(overlay, (w//2 - tw//2 - 20, h//2 - 50),
+                      (w//2 + tw//2 + 20, h//2 + 50), color, -1)
         cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
         cv2.putText(frame, text, (w//2 - tw//2, h//2 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 4)
 
-    if is_move:
-        show_overlay("MOVE", (180, 0, 180))
-    if time.time() - click_display_time < CLICK_DISPLAY_DURATION:
-        show_overlay("CLICK!", (0, 0, 200))
-    if time.time() - r_click_display_time < CLICK_DISPLAY_DURATION:
-        show_overlay("RIGHT CLICK!", (0, 100, 200))
-    if time.time() - up_display_time < DIR_DISPLAY_DURATION:
-        show_overlay("UP", (200, 100, 0))
-    if time.time() - down_display_time < DIR_DISPLAY_DURATION:
-        show_overlay("DOWN", (0, 150, 100))
+    # 音声関連オーバーレイ（最優先で表示）
+    if current_voice_state == "listening":
+        show_overlay("VOICE...", (0, 180, 80))
+    elif peace_hold_active:
+        # キープ中：プログレスバーを表示
+        held    = time.time() - peace_start_time
+        ratio   = min(held / VOICE_HOLD_SEC, 1.0)
+        bar_w   = int(w * 0.6)
+        bar_x   = (w - bar_w) // 2
+        bar_y   = h - 60
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + 20), (60, 60, 60), -1)
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_w * ratio), bar_y + 20), (0, 220, 80), -1)
+        cv2.putText(frame, "PEACE: hold...", (bar_x, bar_y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 80), 2)
+    else:
+        if is_move:
+            show_overlay("MOVE", (180, 0, 180))
+        if time.time() - click_display_time < CLICK_DISPLAY_DURATION:
+            show_overlay("CLICK!", (0, 0, 200))
+        if time.time() - r_click_display_time < CLICK_DISPLAY_DURATION:
+            show_overlay("RIGHT CLICK!", (0, 100, 200))
+        if time.time() - up_display_time < DIR_DISPLAY_DURATION:
+            show_overlay("UP", (200, 100, 0))
+        if time.time() - down_display_time < DIR_DISPLAY_DURATION:
+            show_overlay("DOWN", (0, 150, 100))
 
-    cv2.putText(frame, "[q]:Quit", (5, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    # ── ステータスバー ──
+    status = "[q]:Quit  |  Peace sign = Voice Input"
+    cv2.putText(frame, status, (5, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
     cv2.imshow('Hand Mouse', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
