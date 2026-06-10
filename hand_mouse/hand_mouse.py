@@ -11,13 +11,11 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from voice_module import listen_voice, type_text
 
-# pyautogui の安全装置を無効化
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
 SCREEN_W, SCREEN_H = pyautogui.size()
 
-# ── カメラ検索 ──
 def find_cameras():
     cameras = []
     for i in range(10):
@@ -27,7 +25,6 @@ def find_cameras():
             cap.release()
     return cameras
 
-# ── ランドマーク接続情報 ──
 HAND_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,4),
     (0,5),(5,6),(6,7),(7,8),
@@ -63,7 +60,6 @@ def show_overlay(frame, text, color, w, h):
                 cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 4)
 
 def main():
-    # ── モデルファイルのパス（exe化対応）──
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
     else:
@@ -77,7 +73,6 @@ def main():
         messagebox.showerror("エラー", f"hand_landmarker.task が見つかりません。\n探した場所: {model_path}")
         sys.exit(1)
 
-    # ── カメラ選択 ──
     available_cameras = find_cameras()
     if len(available_cameras) == 0:
         import tkinter as tk
@@ -107,21 +102,23 @@ def main():
             except ValueError:
                 pass
 
-    # ── HandLandmarker 初期化 ──
     base_options = mp_python.BaseOptions(model_asset_path=model_path)
     options = mp_vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
     detector = mp_vision.HandLandmarker.create_from_options(options)
 
-    # ── カメラ初期化 ──
     cap = cv2.VideoCapture(selected)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    # ── 操作設定 ──
     PINCH_THRESHOLD        = 0.06
     DIR_THRESHOLD          = 0.1
     SCROLL_AMOUNT          = 3
     CURSOR_ALPHA           = 0.3
+
+    CAM_LEFT   = 0.2
+    CAM_RIGHT  = 0.8
+    CAM_TOP    = 0.2
+    CAM_BOTTOM = 0.8
 
     pinch_active           = False
     r_pinch_active         = False
@@ -135,7 +132,6 @@ def main():
     CLICK_DISPLAY_DURATION = 0.5
     DIR_DISPLAY_DURATION   = 0.3
 
-    # ── 音声入力の状態管理 ──
     voice_state            = "idle"
     voice_state_lock       = threading.Lock()
     VOICE_HOLD_SEC         = 0.8
@@ -197,10 +193,8 @@ def main():
             ring_fold   = finger_folded(landmarks[16], landmarks[13], wrist)
             pinky_fold  = finger_folded(landmarks[20], landmarks[17], wrist)
 
-            # スクロール姿勢（ピース誤検出防止に使う）
             scroll_pose = thumb_ext and index_ext and middle_fold and ring_fold and pinky_fold
 
-            # ピースサイン判定（人差し指＋中指を立て、薬指・小指を折る）
             peace_pose = (
                 index_ext and middle_ext
                 and ring_fold and pinky_fold
@@ -223,26 +217,24 @@ def main():
             else:
                 peace_hold_active = False
 
-            # 音声入力中は他の操作をスキップ
             if current_voice_state == "idle":
 
-                # 全指開き → カーソル移動
                 all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext \
                            and not middle_fold and not ring_fold and not pinky_fold
                 if all_open:
                     is_move = True
-                    # 5・9・13・17番の平均（手のひら中心）
                     palm_x = (landmarks[5].x + landmarks[9].x + landmarks[13].x + landmarks[17].x) / 4
                     palm_y = (landmarks[5].y + landmarks[9].y + landmarks[13].y + landmarks[17].y) / 4
-                    target_x = palm_x * SCREEN_W
-                    target_y = palm_y * SCREEN_H
+                    mapped_x = (palm_x - CAM_LEFT)  / (CAM_RIGHT  - CAM_LEFT)
+                    mapped_y = (palm_y - CAM_TOP)   / (CAM_BOTTOM - CAM_TOP)
+                    target_x = max(0.0, min(1.0, mapped_x)) * SCREEN_W
+                    target_y = max(0.0, min(1.0, mapped_y)) * SCREEN_H
                     smooth_cx += CURSOR_ALPHA * (target_x - smooth_cx)
                     smooth_cy += CURSOR_ALPHA * (target_y - smooth_cy)
                     cx = max(0, min(SCREEN_W - 1, int(smooth_cx)))
                     cy = max(0, min(SCREEN_H - 1, int(smooth_cy)))
                     pyautogui.moveTo(cx, cy)
 
-                # 左クリック（親指 + 人差し指）
                 thumb_px = (int(thumb.x * w), int(thumb.y * h))
                 index_px = (int(index_tip.x * w), int(index_tip.y * h))
                 cv2.circle(frame, thumb_px, 10, (255, 165, 0), -1)
@@ -258,7 +250,6 @@ def main():
                 else:
                     pinch_active = False
 
-                # 右クリック（親指 + 中指）
                 middle_px = (int(middle_tip.x * w), int(middle_tip.y * h))
                 cv2.circle(frame, middle_px, 10, (0, 165, 255), -1)
                 cv2.line(frame, thumb_px, middle_px, (0, 165, 255), 2)
@@ -272,7 +263,6 @@ def main():
                 else:
                     r_pinch_active = False
 
-                # スクロール（親指＋人差し指の2本立て）
                 if scroll_pose:
                     dy = index_base.y - index_tip.y
                     if dy > DIR_THRESHOLD:
@@ -285,7 +275,6 @@ def main():
         else:
             peace_hold_active = False
 
-        # ── オーバーレイ表示 ──
         if current_voice_state == "listening":
             show_overlay(frame, "VOICE...", (0, 180, 80), w, h)
         elif peace_hold_active:
@@ -314,7 +303,6 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.imshow('Hand Mouse', frame)
 
-        # 他のウィンドウをクリックしたら最背面に移動
         try:
             hwnd = win32gui.FindWindow(None, 'Hand Mouse')
             if hwnd:
