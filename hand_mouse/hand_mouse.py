@@ -25,6 +25,7 @@ def find_cameras():
             cap.release()
     return cameras
 
+
 HAND_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,4),
     (0,5),(5,6),(6,7),(7,8),
@@ -110,15 +111,66 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    PINCH_THRESHOLD        = 0.06
-    DIR_THRESHOLD          = 0.1
-    SCROLL_AMOUNT          = 3
-    CURSOR_ALPHA           = 0.3
+    import tkinter as tk
+    from tkinter import ttk
 
-    CAM_LEFT   = 0.2
-    CAM_RIGHT  = 0.8
-    CAM_TOP    = 0.2
-    CAM_BOTTOM = 0.8
+    settings = {}
+    def open_settings():
+        root = tk.Tk()
+        root.title("Hand Mouse 設定")
+        root.resizable(False, False)
+
+        tk.Label(root, text="Hand Mouse 設定", font=("", 14, "bold")).grid(
+            row=0, column=0, columnspan=2, pady=(16, 8), padx=24)
+
+        fields = [
+            ("カーソル感度",       "cursor_alpha",  0.1,  1.0,  0.05, 0.3),
+            ("スクロール量",       "scroll_amount", 1,    20,   1,    3),
+            ("ピンチ判定の距離",   "pinch_threshold", 0.02, 0.15, 0.01, 0.06),
+            ("有効範囲（左右）",   "cam_margin_x",  0.05, 0.4,  0.05, 0.2),
+            ("有効範囲（上下）",   "cam_margin_y",  0.05, 0.4,  0.05, 0.2),
+        ]
+
+        vars_ = {}
+        for i, (label, key, mn, mx, step, default) in enumerate(fields, start=1):
+            tk.Label(root, text=label, anchor="w", width=20).grid(
+                row=i, column=0, padx=(24, 8), pady=6, sticky="w")
+            var = tk.DoubleVar(value=default)
+            vars_[key] = var
+            sb = tk.Spinbox(root, from_=mn, to=mx, increment=step,
+                            textvariable=var, width=8, format="%.2f")
+            sb.grid(row=i, column=1, padx=(0, 24), pady=6)
+
+        def on_start():
+            for key, var in vars_.items():
+                settings[key] = var.get()
+            root.destroy()
+
+        def on_cancel():
+            root.destroy()
+            sys.exit(0)
+
+        tk.Button(root, text="起動", command=on_start, width=10,
+                  bg="#4CAF50", fg="white").grid(row=len(fields)+1, column=0, pady=(12,16), padx=24)
+        tk.Button(root, text="キャンセル", command=on_cancel, width=10).grid(
+            row=len(fields)+1, column=1, pady=(12,16), padx=(0,24))
+
+        root.protocol("WM_DELETE_WINDOW", on_cancel)
+        root.mainloop()
+
+    open_settings()
+
+    CURSOR_ALPHA           = settings.get("cursor_alpha",    0.3)
+    SCROLL_AMOUNT          = int(settings.get("scroll_amount",   3))
+    PINCH_THRESHOLD        = settings.get("pinch_threshold", 0.06)
+    DIR_THRESHOLD          = 0.1
+    margin_x               = settings.get("cam_margin_x",    0.2)
+    margin_y               = settings.get("cam_margin_y",    0.2)
+
+    CAM_LEFT   = margin_x
+    CAM_RIGHT  = 1.0 - margin_x
+    CAM_TOP    = margin_y
+    CAM_BOTTOM = 1.0 - margin_y
 
     pinch_active           = False
     r_pinch_active         = False
@@ -132,6 +184,7 @@ def main():
     CLICK_DISPLAY_DURATION = 0.5
     DIR_DISPLAY_DURATION   = 0.3
 
+    # ── 音声入力の状態管理 ──
     voice_state            = "idle"
     voice_state_lock       = threading.Lock()
     VOICE_HOLD_SEC         = 0.8
