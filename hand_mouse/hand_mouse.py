@@ -124,6 +124,7 @@ def main():
         root = tk.Tk(); root.withdraw()
         from tkinter import messagebox
         messagebox.showerror("エラー", f"hand_landmarker.task が見つかりません。\n探した場所: {model_path}")
+        root.destroy()
         sys.exit(1)
 
     available_cameras = find_cameras()
@@ -131,6 +132,7 @@ def main():
         root = tk.Tk(); root.withdraw()
         from tkinter import messagebox
         messagebox.showerror("エラー", "カメラが見つかりませんでした。")
+        root.destroy()
         sys.exit(1)
     elif len(available_cameras) == 1:
         selected = available_cameras[0]
@@ -141,6 +143,7 @@ def main():
         while True:
             ans = simpledialog.askstring("カメラ選択", f"使用するカメラ番号を入力してください。\n{options_str}")
             if ans is None:
+                root.destroy()
                 sys.exit(0)
             try:
                 selected = int(ans)
@@ -148,6 +151,7 @@ def main():
                     break
             except ValueError:
                 pass
+        root.destroy()  # ← 選択完了後にTkインスタンスを破棄
 
     settings = open_settings()
     if settings is None:
