@@ -4,6 +4,7 @@ import cv2
 import math
 import time
 import threading
+import tkinter as tk
 import pyautogui
 import win32gui, win32con
 import mediapipe as mp
@@ -24,7 +25,6 @@ def find_cameras():
             cameras.append(i)
             cap.release()
     return cameras
-
 
 HAND_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,4),
@@ -60,6 +60,59 @@ def show_overlay(frame, text, color, w, h):
     cv2.putText(frame, text, (w//2 - tw//2, h//2 + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 4)
 
+def open_settings(current=None):
+    defaults = current or {
+        "cursor_alpha":    0.3,
+        "scroll_amount":   3,
+        "pinch_threshold": 0.06,
+        "cam_margin_x":    0.2,
+        "cam_margin_y":    0.2,
+    }
+    result = {}
+
+    root = tk.Tk()
+    root.title("Hand Mouse 設定")
+    root.resizable(False, False)
+
+    tk.Label(root, text="Hand Mouse 設定", font=("", 14, "bold")).grid(
+        row=0, column=0, columnspan=2, pady=(16, 8), padx=24)
+
+    fields = [
+        ("カーソル感度",     "cursor_alpha",    0.1,  1.0,  0.05, defaults["cursor_alpha"]),
+        ("スクロール量",     "scroll_amount",   1,    20,   1,    defaults["scroll_amount"]),
+        ("ピンチ判定の距離", "pinch_threshold", 0.02, 0.15, 0.01, defaults["pinch_threshold"]),
+        ("有効範囲（左右）", "cam_margin_x",    0.05, 0.4,  0.05, defaults["cam_margin_x"]),
+        ("有効範囲（上下）", "cam_margin_y",    0.05, 0.4,  0.05, defaults["cam_margin_y"]),
+    ]
+
+    vars_ = {}
+    for i, (label, key, mn, mx, step, default) in enumerate(fields, start=1):
+        tk.Label(root, text=label, anchor="w", width=20).grid(
+            row=i, column=0, padx=(24, 8), pady=6, sticky="w")
+        var = tk.DoubleVar(value=default)
+        vars_[key] = var
+        sb = tk.Spinbox(root, from_=mn, to=mx, increment=step,
+                        textvariable=var, width=8, format="%.2f")
+        sb.grid(row=i, column=1, padx=(0, 24), pady=6)
+
+    def on_start():
+        for key, var in vars_.items():
+            result[key] = var.get()
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    tk.Button(root, text="起動", command=on_start, width=10,
+              bg="#4CAF50", fg="white").grid(row=len(fields)+1, column=0, pady=(12, 16), padx=24)
+    tk.Button(root, text="キャンセル", command=on_cancel, width=10).grid(
+        row=len(fields)+1, column=1, pady=(12, 16), padx=(0, 24))
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    root.mainloop()
+
+    return result if result else None
+
 def main():
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
@@ -68,32 +121,25 @@ def main():
     model_path = os.path.join(base_dir, "hand_landmarker.task")
 
     if not os.path.exists(model_path):
-        import tkinter as tk
-        from tkinter import messagebox
         root = tk.Tk(); root.withdraw()
+        from tkinter import messagebox
         messagebox.showerror("エラー", f"hand_landmarker.task が見つかりません。\n探した場所: {model_path}")
         sys.exit(1)
 
     available_cameras = find_cameras()
     if len(available_cameras) == 0:
-        import tkinter as tk
-        from tkinter import messagebox
         root = tk.Tk(); root.withdraw()
+        from tkinter import messagebox
         messagebox.showerror("エラー", "カメラが見つかりませんでした。")
         sys.exit(1)
     elif len(available_cameras) == 1:
         selected = available_cameras[0]
-        print(f"カメラ {selected} を使用します。")
     else:
-        import tkinter as tk
-        from tkinter import simpledialog
         root = tk.Tk(); root.withdraw()
+        from tkinter import simpledialog
         options_str = "\n".join([f"{idx}: カメラ {idx}" for idx in available_cameras])
         while True:
-            ans = simpledialog.askstring(
-                "カメラ選択",
-                f"使用するカメラ番号を入力してください。\n{options_str}"
-            )
+            ans = simpledialog.askstring("カメラ選択", f"使用するカメラ番号を入力してください。\n{options_str}")
             if ans is None:
                 sys.exit(0)
             try:
@@ -103,6 +149,10 @@ def main():
             except ValueError:
                 pass
 
+    settings = open_settings()
+    if settings is None:
+        sys.exit(0)
+
     base_options = mp_python.BaseOptions(model_asset_path=model_path)
     options = mp_vision.HandLandmarkerOptions(base_options=base_options, num_hands=1)
     detector = mp_vision.HandLandmarker.create_from_options(options)
@@ -111,85 +161,40 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    import tkinter as tk
-    from tkinter import ttk
+    running = [True]
 
-    settings = {}
-    def open_settings():
-        root = tk.Tk()
-        root.title("Hand Mouse 設定")
-        root.resizable(False, False)
+    def apply_settings(s):
+        return {
+            "CURSOR_ALPHA":    s.get("cursor_alpha",    0.3),
+            "SCROLL_AMOUNT":   int(s.get("scroll_amount",   3)),
+            "PINCH_THRESHOLD": s.get("pinch_threshold", 0.06),
+            "DIR_THRESHOLD":   0.1,
+            "CAM_LEFT":        s.get("cam_margin_x",    0.2),
+            "CAM_RIGHT":       1.0 - s.get("cam_margin_x", 0.2),
+            "CAM_TOP":         s.get("cam_margin_y",    0.2),
+            "CAM_BOTTOM":      1.0 - s.get("cam_margin_y", 0.2),
+        }
 
-        tk.Label(root, text="Hand Mouse 設定", font=("", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, pady=(16, 8), padx=24)
+    cfg = apply_settings(settings)
 
-        fields = [
-            ("カーソル感度",       "cursor_alpha",  0.1,  1.0,  0.05, 0.3),
-            ("スクロール量",       "scroll_amount", 1,    20,   1,    3),
-            ("ピンチ判定の距離",   "pinch_threshold", 0.02, 0.15, 0.01, 0.06),
-            ("有効範囲（左右）",   "cam_margin_x",  0.05, 0.4,  0.05, 0.2),
-            ("有効範囲（上下）",   "cam_margin_y",  0.05, 0.4,  0.05, 0.2),
-        ]
-
-        vars_ = {}
-        for i, (label, key, mn, mx, step, default) in enumerate(fields, start=1):
-            tk.Label(root, text=label, anchor="w", width=20).grid(
-                row=i, column=0, padx=(24, 8), pady=6, sticky="w")
-            var = tk.DoubleVar(value=default)
-            vars_[key] = var
-            sb = tk.Spinbox(root, from_=mn, to=mx, increment=step,
-                            textvariable=var, width=8, format="%.2f")
-            sb.grid(row=i, column=1, padx=(0, 24), pady=6)
-
-        def on_start():
-            for key, var in vars_.items():
-                settings[key] = var.get()
-            root.destroy()
-
-        def on_cancel():
-            root.destroy()
-            sys.exit(0)
-
-        tk.Button(root, text="起動", command=on_start, width=10,
-                  bg="#4CAF50", fg="white").grid(row=len(fields)+1, column=0, pady=(12,16), padx=24)
-        tk.Button(root, text="キャンセル", command=on_cancel, width=10).grid(
-            row=len(fields)+1, column=1, pady=(12,16), padx=(0,24))
-
-        root.protocol("WM_DELETE_WINDOW", on_cancel)
-        root.mainloop()
-
-    open_settings()
-
-    CURSOR_ALPHA           = settings.get("cursor_alpha",    0.3)
-    SCROLL_AMOUNT          = int(settings.get("scroll_amount",   3))
-    PINCH_THRESHOLD        = settings.get("pinch_threshold", 0.06)
-    DIR_THRESHOLD          = 0.1
-    margin_x               = settings.get("cam_margin_x",    0.2)
-    margin_y               = settings.get("cam_margin_y",    0.2)
-
-    CAM_LEFT   = margin_x
-    CAM_RIGHT  = 1.0 - margin_x
-    CAM_TOP    = margin_y
-    CAM_BOTTOM = 1.0 - margin_y
-
-    pinch_active           = False
-    r_pinch_active         = False
-    smooth_cx              = float(SCREEN_W // 2)
-    smooth_cy              = float(SCREEN_H // 2)
-
-    click_display_time     = 0
-    r_click_display_time   = 0
-    up_display_time        = 0
-    down_display_time      = 0
+    pinch_active         = False
+    r_pinch_active       = False
+    smooth_cx            = float(SCREEN_W // 2)
+    smooth_cy            = float(SCREEN_H // 2)
+    click_display_time   = 0
+    r_click_display_time = 0
+    up_display_time      = 0
+    down_display_time    = 0
     CLICK_DISPLAY_DURATION = 0.5
     DIR_DISPLAY_DURATION   = 0.3
 
-    # ── 音声入力の状態管理 ──
-    voice_state            = "idle"
-    voice_state_lock       = threading.Lock()
-    VOICE_HOLD_SEC         = 0.8
-    peace_start_time       = 0.0
-    peace_hold_active      = False
+    voice_state      = "idle"
+    voice_state_lock = threading.Lock()
+    VOICE_HOLD_SEC   = 0.8
+    peace_start_time = 0.0
+    peace_hold_active = False
+
+    settings_requested = [False]
 
     def voice_worker():
         nonlocal voice_state
@@ -201,14 +206,26 @@ def main():
             with voice_state_lock:
                 voice_state = "idle"
 
-    print("起動しました。[q]キーで終了します。")
-    print(f"画面解像度: {SCREEN_W} x {SCREEN_H}")
-    print("ピースサイン（人差し指＋中指を立てて0.8秒キープ）で音声入力モードに入ります。")
+    cv2.namedWindow('Hand Mouse')
 
-    while cap.isOpened():
+    def on_mouse(event, x, y, flags, param):
+        pass
+
+    cv2.setMouseCallback('Hand Mouse', on_mouse)
+
+    sent_to_back = False
+
+    while running[0] and cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
+
+        if settings_requested[0]:
+            settings_requested[0] = False
+            new_settings = open_settings(settings)
+            if new_settings:
+                settings = new_settings
+                cfg = apply_settings(settings)
 
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
@@ -271,19 +288,18 @@ def main():
                 peace_hold_active = False
 
             if current_voice_state == "idle":
-
                 all_open = thumb_ext and index_ext and middle_ext and ring_ext and pinky_ext \
                            and not middle_fold and not ring_fold and not pinky_fold
                 if all_open:
                     is_move = True
                     palm_x = (landmarks[5].x + landmarks[9].x + landmarks[13].x + landmarks[17].x) / 4
                     palm_y = (landmarks[5].y + landmarks[9].y + landmarks[13].y + landmarks[17].y) / 4
-                    mapped_x = (palm_x - CAM_LEFT)  / (CAM_RIGHT  - CAM_LEFT)
-                    mapped_y = (palm_y - CAM_TOP)   / (CAM_BOTTOM - CAM_TOP)
+                    mapped_x = (palm_x - cfg["CAM_LEFT"])  / (cfg["CAM_RIGHT"]  - cfg["CAM_LEFT"])
+                    mapped_y = (palm_y - cfg["CAM_TOP"])   / (cfg["CAM_BOTTOM"] - cfg["CAM_TOP"])
                     target_x = max(0.0, min(1.0, mapped_x)) * SCREEN_W
                     target_y = max(0.0, min(1.0, mapped_y)) * SCREEN_H
-                    smooth_cx += CURSOR_ALPHA * (target_x - smooth_cx)
-                    smooth_cy += CURSOR_ALPHA * (target_y - smooth_cy)
+                    smooth_cx += cfg["CURSOR_ALPHA"] * (target_x - smooth_cx)
+                    smooth_cy += cfg["CURSOR_ALPHA"] * (target_y - smooth_cy)
                     cx = max(0, min(SCREEN_W - 1, int(smooth_cx)))
                     cy = max(0, min(SCREEN_H - 1, int(smooth_cy)))
                     pyautogui.moveTo(cx, cy)
@@ -295,12 +311,14 @@ def main():
                 cv2.line(frame, thumb_px, index_px, (255, 165, 0), 2)
 
                 dist_left = dist2d(thumb, index_tip)
-                if dist_left < PINCH_THRESHOLD and not is_directing:
+                if dist_left < cfg["PINCH_THRESHOLD"] and not is_directing:
                     if not pinch_active:
                         pinch_active = True
                         click_display_time = time.time()
-                        pyautogui.click()
+                        pyautogui.mouseDown()
                 else:
+                    if pinch_active:
+                        pyautogui.mouseUp()
                     pinch_active = False
 
                 middle_px = (int(middle_tip.x * w), int(middle_tip.y * h))
@@ -308,7 +326,7 @@ def main():
                 cv2.line(frame, thumb_px, middle_px, (0, 165, 255), 2)
 
                 dist_right = dist2d(thumb, middle_tip)
-                if dist_right < PINCH_THRESHOLD and not is_directing:
+                if dist_right < cfg["PINCH_THRESHOLD"] and not is_directing:
                     if not r_pinch_active:
                         r_pinch_active = True
                         r_click_display_time = time.time()
@@ -318,15 +336,18 @@ def main():
 
                 if scroll_pose:
                     dy = index_base.y - index_tip.y
-                    if dy > DIR_THRESHOLD:
+                    if dy > cfg["DIR_THRESHOLD"]:
                         up_display_time = time.time()
-                        pyautogui.scroll(SCROLL_AMOUNT)
-                    elif dy < -DIR_THRESHOLD:
+                        pyautogui.scroll(cfg["SCROLL_AMOUNT"])
+                    elif dy < -cfg["DIR_THRESHOLD"]:
                         down_display_time = time.time()
-                        pyautogui.scroll(-SCROLL_AMOUNT)
+                        pyautogui.scroll(-cfg["SCROLL_AMOUNT"])
 
         else:
             peace_hold_active = False
+            if pinch_active:
+                pyautogui.mouseUp()
+                pinch_active = False
 
         if current_voice_state == "listening":
             show_overlay(frame, "VOICE...", (0, 180, 80), w, h)
@@ -352,21 +373,28 @@ def main():
             if time.time() - down_display_time < DIR_DISPLAY_DURATION:
                 show_overlay(frame, "DOWN", (0, 150, 100), w, h)
 
-        cv2.putText(frame, "[q]:Quit  |  Peace sign = Voice Input", (5, h - 10),
+        cv2.putText(frame, "[s]:Settings  |  Peace sign = Voice Input", (5, h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.imshow('Hand Mouse', frame)
 
-        try:
-            hwnd = win32gui.FindWindow(None, 'Hand Mouse')
-            if hwnd:
-                win32gui.SetWindowPos(hwnd, win32con.HWND_BOTTOM, 0, 0, 0, 0,
-                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
-        except Exception:
-            pass
+        if not sent_to_back:
+            try:
+                hwnd = win32gui.FindWindow(None, 'Hand Mouse')
+                if hwnd:
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_BOTTOM, 0, 0, 0, 0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                    sent_to_back = True
+            except Exception:
+                pass
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("アプリを終了しました。")
-            break
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('s'):
+            settings_requested[0] = True
+        if cv2.getWindowProperty('Hand Mouse', cv2.WND_PROP_VISIBLE) < 1:
+            running[0] = False
+
+    if pinch_active:
+        pyautogui.mouseUp()
 
     cap.release()
     cv2.destroyAllWindows()
